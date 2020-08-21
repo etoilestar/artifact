@@ -34,7 +34,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, writer, op):
+def train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, writer, op, gpu=0):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -51,24 +51,24 @@ def train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, w
         data_time.update(time.time() - end)
 
         #转到gpu
-        inputs = inputs.float().cuda(params['gpu'][0])
-        targets = targets.float().cuda(params['gpu'][0])
+        inputs = inputs.float().cuda(gpu[0])
+        targets = targets.float().cuda(gpu[0])
 
         # for _ in range(5):
         op.stepD(optimizer_D, inputs, targets)
-        # if step % 5 == 0:
-        for p in model_D.parameters():
-            p.requires_grad_(False)
-        op.stepG(optimizer_G, inputs)
-        for p in model_D.parameters():
-            p.requires_grad_(True)
+        if step % 3 == 0:
+            for p in model_D.parameters():
+                p.requires_grad_(False)
+            op.stepG(optimizer_G, inputs, targets)
+            for p in model_D.parameters():
+                p.requires_grad_(True)
 
-        loss, D_cost, Wasserstain, G_cost = op.get_result()
+            loss, D_cost, Wasserstain, G_cost = op.get_result()
 
-        losses.update(loss)
-        D_costs.update(D_cost)
-        Wasserstains.update(Wasserstain)
-        G_costs.update(G_cost)
+            losses.update(loss)
+            D_costs.update(D_cost)
+            Wasserstains.update(Wasserstain)
+            G_costs.update(G_cost)
 
         # if step == 200:
         #     op.generate_img(inputs, targets)
@@ -80,7 +80,7 @@ def train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, w
     return losses.avg, D_costs.avg, Wasserstains.avg, G_costs.avg, data_time.avg, batch_time.avg
 
 
-def validation(model_D, model_G, val_dataloader, epoch, optimizer_D, optimizer_G, writer, op, test_only = False):
+def validation(model_D, model_G, val_dataloader, epoch, optimizer_D, optimizer_G, writer, op, test_only = False,gpu=0):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -93,8 +93,8 @@ def validation(model_D, model_G, val_dataloader, epoch, optimizer_D, optimizer_G
     with torch.no_grad():#验证，测试模式下不累计梯度
         for step, (inputs, targets) in enumerate(tqdm(val_dataloader)):
             data_time.update(time.time() - end)
-            inputs = inputs.float().cuda(params['gpu'][0])
-            targets = targets.float().cuda(params['gpu'][0])
+            inputs = inputs.float().cuda(gpu[0])
+            targets = targets.float().cuda(gpu[0])
             if test_only:
                 op.generate_img(inputs, targets)
                 continue
@@ -119,79 +119,79 @@ def main():
 
     writer = SummaryWriter(log_dir=logdir)
 
+    gpu = params['gpu']
+    batchsize = params['batch_size']
+    pretrained_path = params['pretrained']
     #定义训练集和验证集的dataloader
     train_dataloader = \
         DataLoader(
             MYdataloader(path=params['train_path'],mode='train'),
-            batch_size=params['batch_size'], shuffle=True, num_workers=params['num_workers'])
+            batch_size=batchsize, shuffle=True, num_workers=params['num_workers'])
 
     val_dataloader = \
         DataLoader(
             MYdataloader(path=params['train_path'], mode='valid'),
-            batch_size=params['batch_size'], shuffle=True, num_workers=params['num_workers'])
-
-#    model = MYmodel()#也可以使用别人定义好的模型库，如：
-#     model = model.cuda(params['gpu'][0])#将模型转到gpu
-#     model = nn.DataParallel(model, device_ids=params['gpu'])  # 多gpu并行
+            batch_size=batchsize, shuffle=True, num_workers=params['num_workers'])
 
     model_D = Discriminator()
     model_G = Generator()
-    model_D = model_D.cuda(params['gpu'][0])#将模型转到gpu
-    model_D = nn.DataParallel(model_D, device_ids=params['gpu'])  # 多gpu并行
-    model_G = model_G.cuda(params['gpu'][0])#将模型转到gpu
-    model_G = nn.DataParallel(model_G, device_ids=params['gpu'])  # 多gpu并行
+    model_D = model_D.cuda(gpu[0])#将模型转到gpu
+    model_D = nn.DataParallel(model_D, device_ids=gpu)  # 多gpu并行
+    model_G = model_G.cuda(gpu[0])#将模型转到gpu
+    model_G = nn.DataParallel(model_G, device_ids=gpu)  # 多gpu并行
 
     #加载预训练参数，可以是之前训练中停的参数
-    if params['pretrained'] is not None:
+    if pretrained_path is not None:
         pretrained_dict_G = torch.load(os.path.join(params['pretrained'], 'checkpoint_G.pth'), map_location='cpu')
         pretrained_dict_D = torch.load(os.path.join(params['pretrained'], 'checkpoint_D.pth'), map_location='cpu')
-        # try:
-        #     model_dict_D = model_G.module.state_dict()
-        #     model_dict_G = model_G.module.state_dict()
-        # except AttributeError:
         model_dict_D = model_D.state_dict()
+
         model_dict_G = model_G.state_dict()
-        print(model_dict_G.keys())
-        print(pretrained_dict_G.keys())
         pretrained_dict_D = {k: v for k, v in pretrained_dict_D.items() if k in model_dict_D}
         pretrained_dict_G = {k: v for k, v in pretrained_dict_G.items() if k in model_dict_G}
         model_dict_G.update(pretrained_dict_G)
         model_G.load_state_dict(model_dict_G)
         model_dict_D.update(pretrained_dict_D)
         model_D.load_state_dict(model_dict_D)
+        print('load model successfully')
 
-    #如果是类似于图像分类简单的任务，只有单个参数，可以用简单的官方定义好的loss计算函数，如：
-    #criterion = nn.CrossEntropyLoss()
-    # criterion = MYevaluate()
-    #使用动量梯度下降，或者使用ADAM
-    #optimizer = optim.SGD(model.parameters(), lr=params['learning_rate'], momentum=params['momentum'], weight_decay=params['weight_decay'])
-    optimizer_D = optim.Adam(model_D.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
-    optimizer_G = optim.Adam(model_G.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
+    optimizer_D = optim.Adam(model_D.parameters(), lr=params['lr_d'], betas=(0.5, 0.999), weight_decay=params['weight_decay'])
+    optimizer_G = optim.Adam(model_G.parameters(), lr=params['lr_g'], betas=(0.5, 0.999), weight_decay=params['weight_decay'])
+    # scheduler_D = optim.lr_scheduler.ReduceLROnPlateau(optimizer_G, 'min',factor=0.6, patience=6, verbose=True)
+    # scheduler_G = optim.lr_scheduler.ReduceLROnPlateau(optimizer_G, 'min',factor=0.6, patience=6, verbose=True)
+    # scheduler_D = optim.lr_scheduler.StepLR(optimizer_D, 10, 1)
+    # scheduler_G = optim.lr_scheduler.StepLR(optimizer_G, 10, 1)
+
+    scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=100)
+    scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=100)
     #定义优化器
-    op = operate(model_D, model_G)
-    scheduler_D = optim.lr_scheduler.ReduceLROnPlateau(optimizer_G, 'min',factor=0.6, patience=6, verbose=True)
-    scheduler_G = optim.lr_scheduler.ReduceLROnPlateau(optimizer_G, 'min',factor=0.6, patience=6, verbose=True)
+    op = operate(mode=params['mode'])
+    op.loadon_model(model_D, model_G)
+
     model_save_dir = os.path.join(params['save_path'], cur_time)
+
+
+    if params['test_only']:
+        print('-----------------start testing----------------------------')
+        validation(model_D, model_G, train_dataloader, 0, optimizer_D, optimizer_G, writer, op, test_only = True, gpu=gpu)
+        exit()
     if not os.path.exists(model_save_dir):
         os.makedirs(model_save_dir)
     print('\n')
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
     print('-----------------start training----------------------------')
-    if params['test_only']:
-        validation(model_D, model_G, val_dataloader, 0, optimizer_D, optimizer_G, writer, op, test_only = True)
-        exit()
     for epoch in range(params['epoch_num']):
-        train_loss, trainDC, tWasserstain, trainGC, train_data_time, train_batch_time = train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, writer, op)
-        valid_loss, vWasserstain, validGC, valid_data_time, valid_batch_time = validation(model_D, model_G, val_dataloader, epoch, optimizer_D, optimizer_G, writer, op)
-        # train_loss, train_data_time, train_batch_time = train(model, train_dataloader, epoch, criterion, optimizer, writer)
-        # valid_loss, valid_data_time, valid_batch_time = validation(model, val_dataloader, epoch, criterion, optimizer, writer)
+        train_loss, trainDC, tWasserstain, trainGC, train_data_time, train_batch_time = train(model_D, model_G, train_dataloader, epoch, optimizer_D, optimizer_G, writer, op, gpu)
+        valid_loss, vWasserstain, validGC, valid_data_time, valid_batch_time = validation(model_D, model_G, val_dataloader, epoch, optimizer_D, optimizer_G, writer, op,  gpu=gpu)
         #训练过程中通过不同的学习策略调节学习率
-        scheduler_D.step(valid_loss)
-        scheduler_G.step(valid_loss)
+        scheduler_D.step()
+        scheduler_G.step()
         #打印结果
         print('\n')
         print('-----------------------------------------')
         print('epoch:', str(epoch + 1) + "/" + str(params['epoch_num']))
-        print('train loss:%0.4f'%train_loss, 'lr:', optimizer_G.param_groups[0]['lr'])
+        print('train loss:%0.4f'%train_loss, 'lr_g:', optimizer_G.param_groups[0]['lr'], 'lr_d:', optimizer_D.param_groups[0]['lr'])
         print('trainDC:%0.4f'%trainDC, 'train wasserstain:%0.4f'%tWasserstain, 'trainGC:%0.4f'%trainGC)
         print('train_data_time:%0.4f'%train_data_time, 'train_batch_time:%0.4f'%train_batch_time)
         print('valid loss:%0.4f'%valid_loss)

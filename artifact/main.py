@@ -128,7 +128,7 @@ def main():
     #如果是类似于图像分类简单的任务，只有单个参数，可以用简单的官方定义好的loss计算函数，如：
     #criterion = nn.CrossEntropyLoss()
     criterion = MYevaluate()
-    #使用动量梯度下降，或者使用ADAM
+    #使用动量梯度下降
     #optimizer = optim.SGD(model.parameters(), lr=params['learning_rate'], momentum=params['momentum'], weight_decay=params['weight_decay'])
     optimizer = optim.Adam(model.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
     #定义优化器
